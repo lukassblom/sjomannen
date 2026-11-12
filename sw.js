@@ -1,8 +1,8 @@
 /* Sjømannen – service worker for frakoblet bruk.
    Alt appen trenger ligger i én HTML-fil pluss ikoner, så alt lagres ved
    installering. Ny versjon = nytt navn på hurtigbufferen; den gamle slettes. */
-const CACHE = "sjomannen-6e6d4fc6b811";
-const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png", "./apple-touch-icon.png"];
+const CACHE = "sjomannen-fe1033f9400f";
+const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png", "./apple-touch-icon.png", "./ms-gann.mp4", "./ms-gann-poster.jpg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -28,6 +28,37 @@ self.addEventListener("fetch", (event) => {
     // Sidevisning: svar fra hurtigbufferen (virker uten nett), ellers nett.
     event.respondWith(
       caches.match("./index.html").then((hit) => hit || fetch(req))
+    );
+    return;
+  }
+  const range = req.headers.get("range");
+  if (range) {
+    // Video hentes i biter (Range). Svar med riktig bit fra hurtigbufferen,
+    // ellers spiller ikke videoen uten nett i Safari.
+    event.respondWith(
+      caches.match(url.pathname, { ignoreSearch: true }).then((hit) => {
+        if (!hit) return fetch(req);
+        return hit.arrayBuffer().then((buf) => {
+          const m = /bytes=(\d*)-(\d*)/.exec(range) || [];
+          const size = buf.byteLength;
+          let start = m[1] ? parseInt(m[1], 10) : 0;
+          let end = m[2] ? parseInt(m[2], 10) : size - 1;
+          if (!m[1] && m[2]) { start = Math.max(0, size - parseInt(m[2], 10)); end = size - 1; }
+          end = Math.min(end, size - 1);
+          if (start > end || start >= size) {
+            return new Response(null, { status: 416, headers: { "Content-Range": "bytes */" + size } });
+          }
+          return new Response(buf.slice(start, end + 1), {
+            status: 206,
+            headers: {
+              "Content-Type": hit.headers.get("Content-Type") || "application/octet-stream",
+              "Content-Range": "bytes " + start + "-" + end + "/" + size,
+              "Content-Length": String(end - start + 1),
+              "Accept-Ranges": "bytes",
+            },
+          });
+        });
+      })
     );
     return;
   }

@@ -469,6 +469,30 @@ a:hover { color: var(--acc); }
   box-shadow: var(--shadow-lg);
 }
 .scene canvas { width: 100%; height: 100%; display: block; }
+.scene__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: var(--night);
+}
+.scene__toggle {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font: 700 0.68rem/1 var(--f-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: rgba(6, 18, 38, 0.72);
+  border: var(--bw) solid var(--ink);
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.scene__toggle:hover, .scene__toggle[aria-pressed="true"] { background: var(--acc); color: var(--on-acc); border-color: var(--acc); }
 .scene .caption {
   position: absolute;
   left: 0; right: 0; bottom: 0;
@@ -1115,7 +1139,11 @@ footer.site-foot {
       </div>
       <figure class="scene glass">
         <canvas id="heroScene" role="img" aria-label="Tegning: skoleskipet MS Gann sett fra styrbord side om natten, foran en oransje midnattssol. Skipet fører lanternene for et maskindrevet fartøy over 50 meter: to hvite topplanterner, der den akterste står høyest, og grønn sidelanterne."></canvas>
-        <figcaption class="caption"><span>MS Gann, sett fra styrbord</span><span>00:00</span></figcaption>
+        <video id="heroVideo" class="scene__video" muted loop playsinline preload="metadata" poster="ms-gann-poster.jpg" aria-label="Video uten lyd: 3D-animert dronefilm av skoleskipet MS Gann som seiler i kveldslys, sett ovenfra fra styrbord baug." hidden>
+          <source src="ms-gann.mp4" type="video/mp4">
+        </video>
+        <button type="button" class="scene__toggle" id="heroVideoToggle" aria-pressed="false" hidden>Pause</button>
+        <figcaption class="caption"><span id="heroCaption" data-canvas="MS Gann, sett fra styrbord" data-video="MS Gann · 3D-animert dronefilm">MS Gann, sett fra styrbord</span><span id="heroCaptionNote" data-canvas="00:00" data-video="Uten lyd">00:00</span></figcaption>
       </figure>
     </div>
   </div>
@@ -3014,12 +3042,72 @@ footer.site-foot {
         });
       }
 
-      if (!reduceMotion) requestAnimationFrame(draw);
+      if (!reduceMotion && !videoActive) requestAnimationFrame(draw);
     }
+
+    /* Dronefilmen ligger oppå tegningen. Tegningen er reserven: den vises
+       til videoen er klar, og hvis videoen ikke kan lastes eller spilles. */
+    var videoActive = false;
+    (function () {
+      var video = $("#heroVideo"), toggle = $("#heroVideoToggle");
+      var cap = $("#heroCaption"), note = $("#heroCaptionNote");
+      if (!video || !video.canPlayType || !video.canPlayType("video/mp4")) return;
+      var userPaused = false, failed = false;
+      function caption(kind) {
+        if (cap) cap.textContent = cap.getAttribute("data-" + kind);
+        if (note) note.textContent = note.getAttribute("data-" + kind);
+      }
+      function label() {
+        if (!toggle) return;
+        toggle.textContent = video.paused ? "Spill av" : "Pause";
+        toggle.setAttribute("aria-pressed", String(video.paused));
+      }
+      function fail() {
+        if (failed) return;
+        failed = true;
+        video.hidden = true;
+        if (toggle) toggle.hidden = true;
+        canvas.removeAttribute("aria-hidden");
+        caption("canvas");
+        if (videoActive) { videoActive = false; requestAnimationFrame(draw); }
+      }
+      function ready() {
+        if (failed) return;
+        videoActive = true;              // stopper tegneløkken, videoen dekker lerretet
+        canvas.setAttribute("aria-hidden", "true");
+        caption("video");
+        if (toggle) { toggle.hidden = false; label(); }
+      }
+      video.hidden = false;
+      video.addEventListener("loadedmetadata", ready);
+      video.addEventListener("error", fail);
+      var src = $("source", video);
+      if (src) src.addEventListener("error", fail);
+      video.addEventListener("play", label);
+      video.addEventListener("pause", label);
+      function play() {
+        var p = video.play();
+        if (p && p.catch) p.catch(function () { label(); });
+      }
+      if (toggle) toggle.addEventListener("click", function () {
+        if (video.paused) { userPaused = false; play(); } else { userPaused = true; video.pause(); }
+      });
+      if (reduceMotion) { userPaused = true; return; }   // viser bare stillbildet til brukeren trykker
+      if ("IntersectionObserver" in window) {
+        new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (failed) return;
+            if (en.isIntersecting) { if (!userPaused) play(); } else { video.pause(); }
+          });
+        }, { threshold: 0.1 }).observe(video);
+      } else {
+        play();
+      }
+    })();
 
     resize();
     if ("ResizeObserver" in window) {
-      new ResizeObserver(function () { resize(); if (reduceMotion) draw(performance.now()); }).observe(canvas);
+      new ResizeObserver(function () { resize(); if (reduceMotion || videoActive) draw(performance.now()); }).observe(canvas);
     }
     requestAnimationFrame(draw);
   })();
