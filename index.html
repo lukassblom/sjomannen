@@ -1114,8 +1114,8 @@ footer.site-foot {
         </div>
       </div>
       <figure class="scene glass">
-        <canvas id="heroScene" aria-label="Nattbilde: et maskindrevet fartøy over 50 meter sett forfra, med to hvite topplanterner, grønn sidelanterne til venstre og rød til høyre, foran en oransje midnattssol."></canvas>
-        <figcaption class="caption"><span>Maskindrevet fartøy over 50 m, sett forfra</span><span>00:00</span></figcaption>
+        <canvas id="heroScene" role="img" aria-label="Tegning: skoleskipet MS Gann sett fra styrbord side om natten, foran en oransje midnattssol. Skipet fører lanternene for et maskindrevet fartøy over 50 meter: to hvite topplanterner, der den akterste står høyest, og grønn sidelanterne."></canvas>
+        <figcaption class="caption"><span>MS Gann, sett fra styrbord</span><span>00:00</span></figcaption>
       </figure>
     </div>
   </div>
@@ -1686,6 +1686,1030 @@ footer.site-foot {
 </footer>
 
 <script>
+/* ==========================================================================
+   MS «Gann» – Skoleskipet Gann (ex Hurtigruten MS «Narvik», 1982), sett fra
+   styrbord side. FINAL (built on variant C's naval-architecture profile, with
+   variant B's lighting pipeline and variant A's wake grafted in).
+
+   window.drawGann(ctx, o)
+     o = { x, y, len, t, reduceMotion, sunX, sunY, sunR }
+     x   = stern end at the waterline (CSS px)    y = waterline (CSS px)
+     len = length over all (CSS px), bow to the RIGHT (starboard side seen)
+     sunX/sunY = centre of the scene's sun disc, sunR = its radius (optional,
+     default 0.17·len). Draws only the ship + wake + reflection + nav lights.
+
+   The static ship is rendered once to an offscreen canvas, keyed by
+   (len, device-pixel-ratio, sun bucket), and blitted every frame. The cache
+   build does: geometry -> emissive-only twin pass (correct occlusion) ->
+   multiply ambient layer (cool sky from above, dark toward the waterline,
+   warm toward the sun, backlit silhouette in front of the disc) -> sky sheen
+   on the black hull -> emissive windows restored -> screen halo near the
+   disc -> light wrap (visible disc blurred into the silhouette edges in
+   front of it) -> warm rim on sun-facing silhouette edges only, fading out
+   ~0.3·len from the disc -> downsampled additive bloom of the lit windows
+   -> half-res reflection source (dpr capped at 2) with lit windows smeared
+   into short vertical streaks.
+
+   Recommended hero placement (16:10 canvas, horizon 0.6·h, sun at 0.74·w,
+   sunR 0.17·min(w,h)): x = 0.05·w, len = 0.62·w, y = horizon + 0.022·h –
+   the stem then stands in front of the left edge of the disc.
+   Live per frame: perspective-banded reflection, contact shadow, wake wedge
+   + drifting flecks, bow wave and hull foam, rotating radar scanners,
+   navigation lights.
+
+   ---------------------------------------------------------------------------
+   MEASUREMENTS (reference photo referanse-ms-gann.png, 400 x 320 px)
+   ---------------------------------------------------------------------------
+   The photo is a 3/4 view from high on the starboard bow. Perspective was
+   removed with a 1-D projective map along the hull:
+        v = (imgX - 30) / 330 ,  u = v / (0.70 + 0.30·v)   (u = fraction LOA)
+   LOA taken as 108 m (ex «Narvik»: 108.55 m).
+
+     feature                 X (m from stern)
+     stern at waterline        4.9   (cruiser stern)
+     cream casing A            9.0-17.0
+     white deckhouse          17.5-24.2
+     funnel block B (cream)   29.5-39.6
+     aft mast (yellow)        43.6
+     lifeboat (orange)        43.6-52.9
+     rescue boat (orange)     54.5-60.2
+     white box on roof        66.0-71.5
+     fwd radar mast (yellow)  79.4
+     bridge front / wings     91.2
+     «GANN» on the band       85.6-90.6
+     stem at waterline       103.3   (rake ≈ 24°)
+     stem head               108.0
+   Heights: band 4.6–6.25 m, deck-3 roof 14 m, deck-4 roof 17.6 m, funnel
+   top 19.4 m, aft mast ≈ 27 m, radar mast ≈ 22 m.
+
+   Navigation lights (COLREG, power-driven > 50 m, starboard beam view):
+   aft masthead 26.95 m on the aft mast (X 43.6), fwd masthead 22.35 m on the
+   radar mast (X 79.4) – vertical separation 4.6 m ≥ 4.5 m, forward one lower.
+   Green sidelight on the starboard bridge wing at X 90.75, 15.45 m.
+   Nothing else: no red light, no stern light from the starboard beam.
+   ========================================================================== */
+(function () {
+  "use strict";
+
+  var LOA = 108;          // m
+  var TOPM = 28.6;        // canvas extent above WL (m)
+  var BOTM = 1.4;         // below WL (m)
+  var AFTM = 2.2, FWDM = 2.2;
+  var DEG = Math.PI / 180;
+
+  var LIGHT_WHITE = "#fff4d6", LIGHT_GREEN = "#37d67f";
+  var LIGHTS = [
+    { X: 43.6, Y: 26.95, c: LIGHT_WHITE, core: "#ffffff", s: 1.0 },  // aft masthead (higher)
+    { X: 79.4, Y: 22.35, c: LIGHT_WHITE, core: "#ffffff", s: 0.95 }, // fwd masthead (lower)
+    { X: 90.75, Y: 15.45, c: LIGHT_GREEN, core: "#d6ffe6", s: 1.0 }  // starboard sidelight
+  ];
+
+  /* base paint – slightly warm whites; the ambient layer cools them from above */
+  var COL = {
+    white: "#eeeae2", whiteMid: "#dedad2", whiteLo: "#c6c3bc",
+    hullW: "#ebe7df", hullWMid: "#d6d2ca", hullWLo: "#bdbab4",
+    band: "#2465b6", bandHi: "rgba(110,165,230,0.35)", bandLo: "rgba(8,20,45,0.35)",
+    black0: "#1b222d", black1: "#05080d",
+    cream: "#e8c877", creamMid: "#d6b466", creamLo: "#b5924a",
+    yellow: "#eec24a", yellowHi: "#f8da7e", yellowLo: "#aa8220",
+    orange: "#f5832f", orangeHi: "#ffa35a", orangeLo: "#be5518",
+    steel: "#d2d3d2",
+    glass: "#121a26", glassHi: "#2b3b52"
+  };
+  /* lit-window colours: amber, tungsten, pale, dim orange, warm white */
+  var LITC = ["255,196,120", "255,214,152", "255,230,190", "242,158,84", "255,204,136"];
+
+  var cache = { key: "" };
+  var sprites = null;
+  var shared = { ctx: null };
+
+  function hash(n) { var s = Math.sin(n * 91.3458 + 47.853) * 43758.5453; return s - Math.floor(s); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function rise(X) { return X > 66 ? 2.8 * Math.pow((X - 66) / 42, 2) : 0; }
+  function bulwark(X) { return 10.15 + 0.4 * Math.pow(Math.max(0, X - 95) / 13, 2); }
+  function bandBot(X) { return 4.6 + 0.92 * rise(X); }
+  function bandTop(X) { return 6.25 + rise(X); }
+  function mk(w, h) {
+    var c = document.createElement("canvas");
+    c.width = Math.max(1, Math.ceil(w)); c.height = Math.max(1, Math.ceil(h));
+    return c;
+  }
+  function grad(c, x0, y0, x1, y1, stops) {
+    var g = c.createLinearGradient(x0, y0, x1, y1);
+    for (var i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1]);
+    return g;
+  }
+
+  /* hull silhouette, metres, Y up */
+  function hullPath(c) {
+    c.beginPath();
+    c.moveTo(4.9, -1.3);
+    c.lineTo(4.9, 0);
+    c.bezierCurveTo(3.1, 0.3, 1.15, 1.7, 0.55, 4.3);   // cruiser-stern counter
+    c.quadraticCurveTo(0.1, 7.8, 0.0, 11.3);           // rounded stern, slight rake
+    c.lineTo(95.0, 11.2);                              // sheer under the superstructure
+    c.lineTo(95.0, 10.15);                             // step down to forecastle bulwark
+    c.quadraticCurveTo(102.5, 10.15, 108.0, 10.55);    // bulwark rises to the stem
+    c.lineTo(106.1, 5.2);                              // raked stem
+    c.quadraticCurveTo(104.7, 1.5, 103.3, 0.0);        // forefoot
+    c.lineTo(102.9, -1.3);
+    c.closePath();
+  }
+
+  /* rough top of the ship profile (m) at X – used to see how much of the
+     sun disc (upper half, above the horizon) is not hidden by the ship */
+  function profileTop(X) {
+    if (X < 0 || X > LOA) return -99;
+    var t = X < 95 ? 11.3 : 10.5;
+    if (X > 9 && X < 17) t = 16;
+    if (X > 17 && X < 29.5) t = 16.6;
+    if (X > 29.5 && X < 39.6) t = 19.4;
+    if (X > 38 && X < 92) t = 17.6;
+    if (X > 66 && X < 71.5) t = 20.3;
+    return t;
+  }
+  function sunVisible(sun) {
+    var vis = 0, tot = 0;
+    for (var a = -1; a <= 1.001; a += 0.125) for (var b = 0.05; b <= 1; b += 0.15) {
+      if (a * a + b * b > 1) continue;
+      tot++;
+      if (sun.Y + b * sun.R > profileTop(sun.X + a * sun.R)) vis++;
+    }
+    return tot ? vis / tot : 0;
+  }
+
+  /* ------------------------------------------------------------------ */
+  function renderShip(S, sun, small) {
+    var cw = Math.ceil((LOA + AFTM + FWDM) * S), ch = Math.ceil((TOPM + BOTM) * S);
+    var cv = mk(cw, ch), c0 = cv.getContext("2d");
+    var E = mk(cw, ch), e0 = E.getContext("2d");           // emissive-only twin
+    var ox = AFTM * S, oy = TOPM * S;
+    var det = S >= 3.4, railFull = S >= 6, fine = S >= 8.5;
+
+    geometry(c0, false);
+    geometry(e0, true);
+
+    /* ======================================================================
+       GEOMETRY. Run twice: normally, and as an "emissive-only" pass where
+       every opaque op erases (destination-out) and only lit panes paint –
+       this yields the visible lit windows with correct occlusion (boats,
+       davits and rails in front of them).
+       ====================================================================== */
+    function geometry(c, EO) {
+      var X, Y, i, n;
+      function lw(m, px) { return Math.max(m, (px || 0.8) / S); }
+      function M() { c.setTransform(S, 0, 0, -S, ox, oy); }
+      M();
+      if (EO) c.globalCompositeOperation = "destination-out";
+
+      function rect(x0, y0, x1, y1, fill) { c.fillStyle = fill; c.fillRect(x0, y0, x1 - x0, y1 - y0); }
+      function poly(pts, fill) {
+        c.beginPath(); c.moveTo(pts[0], pts[1]);
+        for (var j = 2; j < pts.length; j += 2) c.lineTo(pts[j], pts[j + 1]);
+        c.closePath(); c.fillStyle = fill; c.fill();
+      }
+      function line(x0, y0, x1, y1, w, col) {
+        c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1);
+        c.lineWidth = w; c.strokeStyle = col; c.stroke();
+      }
+      /* ambient-occlusion strip under a deck edge, only onto existing pixels */
+      function ao(x0, x1, y, depth, a) {
+        c.save(); c.globalCompositeOperation = "source-atop";
+        c.fillStyle = grad(c, 0, y - depth, 0, y, [[0, "rgba(12,20,34,0)"], [1, "rgba(12,20,34," + a + ")"]]);
+        c.fillRect(x0, y - depth, x1 - x0, depth);
+        c.restore();
+      }
+      function whiteFill(y0, y1) {
+        return grad(c, 0, y0, 0, y1, [[0, COL.whiteLo], [0.6, COL.whiteMid], [1, COL.white]]);
+      }
+      function edgeHi(x0, x1, y) { rect(x0, y - lw(0.08, 0.7), x1, y, "rgba(250,248,244,0.9)"); }
+      function endShade(x0, x1, y0, y1) {
+        var w = Math.min(0.6, (x1 - x0) * 0.2);
+        rect(x0, y0, x0 + w, y1, "rgba(30,40,60,0.10)");
+        rect(x1 - w, y0, x1, y1, "rgba(30,40,60,0.07)");
+      }
+      function rail(x0, x1, y, h) {
+        if (small) return;                                   // phone: no hairlines
+        h = h || 1.05;
+        if (!railFull) { rect(x0, y, x1, y + h, "rgba(215,215,212,0.16)"); line(x0, y + h, x1, y + h, lw(0.06, 0.6), "rgba(232,230,226,0.7)"); return; }
+        line(x0, y + h, x1, y + h, lw(0.07, 0.7), "rgba(236,234,230,0.95)");
+        line(x0, y + h * 0.5, x1, y + h * 0.5, lw(0.035, 0.45), "rgba(222,220,216,0.6)");
+        for (var sx = x0; sx <= x1 + 0.01; sx += 1.5) line(sx, y, sx, y + h, lw(0.045, 0.5), "rgba(226,224,220,0.8)");
+      }
+      function shape(x0, y0, w, h, round) {
+        if (round) { c.beginPath(); c.arc(x0 + w / 2, y0 + h / 2, w / 2, 0, 7); c.fill(); }
+        else c.fillRect(x0, y0, w, h);
+      }
+      /* window pane; lit panes are emissive (vary warmth + intensity) */
+      function pane(x, y, w, h, lit, seed, round, ci, inten) {
+        var x0 = x - w / 2, y0 = y - h / 2;
+        if (lit) {
+          var prev = c.globalCompositeOperation;
+          if (EO) c.globalCompositeOperation = "source-over";
+          if (ci == null) ci = Math.floor(hash(seed * 3.7) * LITC.length);
+          var a = inten != null ? inten : 0.5 + 0.5 * hash(seed * 5.9 + 1);
+          c.fillStyle = COL.glass; shape(x0, y0, w, h, round);
+          c.fillStyle = "rgba(" + LITC[ci] + "," + a.toFixed(3) + ")"; shape(x0, y0, w, h, round);
+          if (!round && det) {
+            // ceiling a touch brighter, curtains on some panes
+            if (hash(seed * 2.3 + 4) < 0.3) rect(x0, y0 + h * 0.62, x0 + w, y0 + h, "rgba(110,60,25,0.45)");
+            else rect(x0, y0 + h * 0.78, x0 + w, y0 + h, "rgba(255,246,226,0.22)");
+          }
+          c.globalCompositeOperation = prev;
+        } else {
+          c.fillStyle = grad(c, 0, y0, 0, y0 + h, [[0, COL.glass], [1, COL.glassHi]]);
+          shape(x0, y0, w, h, round);
+        }
+      }
+      function emit(x0, y0, x1, y1, rgba) {
+        var prev = c.globalCompositeOperation;
+        if (EO) c.globalCompositeOperation = "source-over";
+        rect(x0, y0, x1, y1, rgba);
+        c.globalCompositeOperation = prev;
+      }
+
+      /* ====================== HULL ====================== */
+      c.save();
+      hullPath(c); c.clip();
+      rect(-1, 5, LOA + 2, 12, grad(c, 0, 6, 0, 11.3, [[0, COL.hullWLo], [0.55, COL.hullWMid], [1, COL.hullW]]));
+      // black lower hull
+      c.beginPath();
+      for (X = -1; X <= LOA + 1; X += 1) c.lineTo(X, bandBot(X) + 0.02);
+      c.lineTo(LOA + 1, -2); c.lineTo(-1, -2); c.closePath();
+      c.fillStyle = grad(c, 0, -0.6, 0, 8, [[0, COL.black1], [0.5, "#0d121b"], [1, COL.black0]]);
+      c.fill();
+      // blue band
+      c.beginPath();
+      for (X = -1; X <= LOA + 1; X += 1) c.lineTo(X, bandTop(X));
+      for (X = LOA + 1; X >= -1; X -= 1) c.lineTo(X, bandBot(X));
+      c.closePath();
+      c.fillStyle = COL.band; c.fill();
+      c.beginPath();
+      for (X = -1; X <= LOA + 1; X += 1) c.lineTo(X, bandTop(X));
+      for (X = LOA + 1; X >= -1; X -= 1) c.lineTo(X, bandTop(X) - 0.35);
+      c.closePath(); c.fillStyle = COL.bandHi; c.fill();
+      c.beginPath();
+      for (X = -1; X <= LOA + 1; X += 1) c.lineTo(X, bandBot(X) + 0.4);
+      for (X = LOA + 1; X >= -1; X -= 1) c.lineTo(X, bandBot(X));
+      c.closePath(); c.fillStyle = COL.bandLo; c.fill();
+      c.beginPath();
+      for (X = -1; X <= LOA + 1; X += 1) c.lineTo(X, bandTop(X) + 0.03);
+      c.lineWidth = lw(0.06, 0.5); c.strokeStyle = "rgba(20,32,55,0.35)"; c.stroke();
+
+      if (det) {
+        c.globalAlpha = fine ? 0.07 : 0.05;
+        for (X = 8; X < 102; X += 6.4) line(X, -0.5, X, bandBot(X) - 0.1, lw(0.04, 0.5), "#9fb5d0");
+        c.globalAlpha = 1;
+      }
+
+      /* hull windows: row A portholes (deck 1), row B rectangular (deck 2) */
+      if (det) {
+        for (i = 0; i < 44; i++) {
+          X = 12.3 + i * 2.0;
+          if (X > 93.5) break;
+          if (hash(i + 3) < 0.2 || (X > 25 && X < 28.5)) continue;
+          pane(X, 7.3 + rise(X) * 0.95, 0.5, 0.5, hash(i * 7.1 + 1) < 0.17, i + 11, true);
+        }
+      }
+      for (i = 0; i < 40; i++) {
+        X = 5.6 + i * 2.32;
+        if (X > 93.8) break;
+        if (hash(i + 41) < 0.14 || (X > 16 && X < 18.8)) continue;
+        pane(X, 9.62 + rise(X) * 0.45, det ? 0.98 : 1.15, det ? 0.8 : 0.95, hash(i * 5.3 + 2) < 0.24, i + 60, false);
+      }
+      if (det) for (i = 0; i < 4; i++) {
+        X = 96.3 + i * 2.0;
+        if (bulwark(X) - bandTop(X) < 1.0) break;
+        pane(X, (bulwark(X) + bandTop(X)) / 2, 0.42, 0.42, i === 1, 90 + i, true, 1, 0.8);
+      }
+
+      line(0.2, 8.65, 95, 8.65, lw(0.05, 0.5), "rgba(40,55,80,0.12)");
+
+      if (det) {
+        X = 101.9; Y = bandTop(X) - 0.95;
+        c.beginPath(); c.ellipse(X, Y, 0.75, 0.55, 0, 0, 7); c.fillStyle = "rgba(6,14,30,0.75)"; c.fill();
+        line(X, Y + 0.3, X, Y - 0.35, lw(0.12, 0.6), "rgba(20,26,34,0.9)");
+        line(X - 0.4, Y - 0.25, X + 0.4, Y - 0.25, lw(0.1, 0.6), "rgba(20,26,34,0.9)");
+        for (i = 0; i < 26; i++) {
+          X = 4 + hash(i + 500) * 90;
+          var top = 9.0 + rise(X) * 0.45, ln = 0.8 + hash(i + 520) * 1.6;
+          rect(X, top - ln, X + 0.12 + hash(i + 540) * 0.12, top, grad(c, 0, top - ln, 0, top, [[0, "rgba(110,80,60,0)"], [1, "rgba(110,80,60,0.12)"]]));
+        }
+        X = 101.75; Y = bandTop(X) - 1.4;
+        rect(X, Y - 3.2, X + 0.35, Y, grad(c, 0, Y - 3.2, 0, Y, [[0, "rgba(120,70,40,0)"], [1, "rgba(120,70,40,0.35)"]]));
+      }
+      // hull curving away (stern quarter, bow flare)
+      rect(-1, -2, 7, 12, grad(c, -1, 0, 7, 0, [[0, "rgba(4,10,22,0.5)"], [1, "rgba(4,10,22,0)"]]));
+      rect(99, -2, 109, 12, grad(c, 99, 0, 109, 0, [[0, "rgba(4,10,22,0)"], [1, "rgba(4,10,22,0.22)"]]));
+      c.restore(); // end hull clip
+
+      // sheer highlight (deck edge)
+      c.beginPath(); c.moveTo(0.0, 11.3); c.lineTo(95.0, 11.2);
+      c.lineWidth = lw(0.09, 0.8); c.strokeStyle = "rgba(250,248,244,0.85)"; c.stroke();
+      c.beginPath(); c.moveTo(95.0, 10.15); c.quadraticCurveTo(102.5, 10.15, 108.0, 10.55); c.stroke();
+      line(0.1, 11.0, 95, 10.95, lw(0.06, 0.5), "rgba(40,55,80,0.18)");
+
+      /* «GANN» on the band, white letters, near the bow */
+      if (S >= 5) {
+        c.save();
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        var gx = 85.6, fs = 1.2 * S;
+        c.font = "bold " + fs.toFixed(1) + "px Arial, Helvetica, sans-serif";
+        c.textBaseline = "middle";
+        c.fillStyle = "rgba(236,240,246,0.92)";
+        var letters = "GANN", adv = 1.12;
+        for (i = 0; i < 4; i++) {
+          var lx = gx + i * adv, ly = bandBot(lx) + (bandTop(lx) - bandBot(lx)) * 0.5;
+          c.fillText(letters[i], ox + lx * S, oy - ly * S);
+        }
+        c.restore(); M();
+      }
+
+      /* ====================== SUPERSTRUCTURE ====================== */
+      rail(0.35, 9.0, 11.3, 1.05);
+
+      // funnel block B (thicker on phones so it survives downscaling)
+      var fp = small ? 0.35 : 0;
+      ao(29.3, 40, 14.0, 0.8, 0.3);
+      rect(29.5, 14.0, 32.4, 17.0, whiteFill(14, 17));
+      edgeHi(29.5, 32.4, 17.0);
+      c.beginPath();
+      c.moveTo(32.3 - fp, 14.0); c.lineTo(39.6 + fp, 14.0); c.lineTo(38.95 + fp, 18.7 + fp);
+      c.quadraticCurveTo(38.85 + fp, 19.4 + fp, 38.1 + fp, 19.4 + fp); c.lineTo(32.4 - fp, 19.4 + fp);
+      c.quadraticCurveTo(31.6 - fp, 19.4 + fp, 31.65 - fp, 18.6 + fp); c.closePath();
+      c.fillStyle = grad(c, 0, 14, 0, 19.4, [[0, COL.creamLo], [0.6, COL.creamMid], [1, COL.cream]]);
+      c.fill();
+      rect(31.9 - fp, 19.05 + fp, 38.6 + fp, 19.4 + fp, "rgba(40,32,20,0.55)");
+      rect(38.2, 14.0, 39.6, 18.8, "rgba(255,200,130,0.10)");
+      rect(33.1, 19.4 + fp, 33.9, 20.25 + fp, "#1b1d22"); rect(34.6, 19.4 + fp, 35.4, 20.0 + fp, "#1b1d22");
+      rect(36.4, 19.4 + fp, 37.0, 19.85 + fp, "#24262b");
+      if (det) for (Y = 15.0; Y < 18.6; Y += 0.55) line(35.6, Y, 38.6 - (Y - 14) * 0.13, Y, lw(0.06, 0.5), "rgba(90,70,30,0.35)");
+      rect(31.5, 14.0, 32.6, 19.4, "rgba(60,45,20,0.12)");
+
+      // cream casing A + white top box (aft)
+      ao(8.8, 17.4, 11.3, 0.7, 0.3);
+      rect(9.0, 11.3, 17.0, 14.8, grad(c, 0, 11.3, 0, 14.8, [[0, COL.creamLo], [0.6, COL.creamMid], [1, COL.cream]]));
+      if (det) for (Y = 12.0; Y < 14.5; Y += 0.5) line(9.6, Y, 12.2, Y, lw(0.06, 0.5), "rgba(90,70,30,0.35)");
+      rect(13.4, 11.3, 14.4, 13.4, "rgba(70,55,30,0.55)");
+      edgeHi(9.0, 17.0, 14.8);
+      rect(10.6, 14.8, 15.0, 16.0, whiteFill(14.8, 16));
+      edgeHi(10.6, 15.0, 16.0);
+      rect(11.9, 16.0, 12.5, 16.9, "#1d1f24"); rect(13.2, 16.0, 13.8, 16.7, "#1d1f24");
+      rail(15.0, 17.0, 14.8, 0.9);
+
+      // deck 3 deckhouse with the lifeboat recess
+      ao(17, 93, 11.25, 0.8, 0.28);
+      rect(17.0, 11.2, 93.0, 14.0, whiteFill(11.2, 14.0));
+      rect(92.4, 11.2, 93.0, 14.0, "rgba(40,55,80,0.12)");
+      edgeHi(17.0, 93.0, 14.0);
+      endShade(17, 93, 11.2, 14);
+      rect(41.0, 11.25, 61.6, 13.72, grad(c, 0, 11.25, 0, 13.72, [[0, "#565e70"], [1, "#2a3140"]]));
+      for (X = 42.2; X < 61; X += 2.3) pane(X, 12.45, 1.1, 0.9, hash(X * 1.3) < 0.4, X * 2, false);
+      rect(41.0, 13.45, 61.6, 13.72, "rgba(10,18,30,0.45)");
+      [41.0, 46.9, 52.6, 58.0, 61.25].forEach(function (px) { rect(px, 11.2, px + 0.35, 13.75, "#cfccc6"); });
+      rail(41.0, 61.6, 11.2, 1.0);
+      for (i = 0; i < 40; i++) {
+        X = 18.6 + i * 2.2;
+        if (X > 91.8) break;
+        if (X > 40.2 && X < 62.4) continue;
+        if (hash(i + 120) < 0.12) continue;
+        pane(X, 12.6, 1.15, 0.95, hash(i * 3.3 + 7) < 0.3, i + 130, false);
+      }
+      rect(26.0, 11.2, 26.9, 13.3, "rgba(60,70,90,0.35)");
+
+      rect(93.0, 10.15, 95.0, 11.2, whiteFill(10.15, 11.2));
+      rail(93.0, 95.0, 11.2, 1.0);
+
+      // white box on deck-3 roof
+      ao(17.3, 24.4, 14.05, 0.6, 0.25);
+      rect(17.5, 14.0, 24.2, 16.6, whiteFill(14, 16.6));
+      edgeHi(17.5, 24.2, 16.6);
+      endShade(17.5, 24.2, 14, 16.6);
+      pane(19.0, 15.4, 0.9, 0.8, false, 1, false); pane(22.6, 15.4, 0.9, 0.8, true, 2, false, 0, 0.75);
+      rect(20.4, 14.0, 21.2, 15.9, "rgba(70,80,100,0.35)");
+      rail(24.2, 29.5, 14.0, 1.0);
+      rail(91.2, 93.0, 14.0, 1.0);
+
+      // deck 4 – the long top deckhouse with lounge and bridge
+      ao(38, 92, 14.05, 0.9, 0.32);
+      poly([38.0, 14.0, 91.2, 14.0, 91.8, 17.6, 38.0, 17.6], whiteFill(14, 17.6));
+      edgeHi(38.0, 91.8, 17.6);
+      endShade(38, 91.5, 14, 17.6);
+      // lounge window band – lit in warm clusters, not one even row
+      rect(42.3, 14.95, 65.6, 16.75, "#161e2a");
+      n = Math.round((65.6 - 42.3) / 1.46);
+      for (i = 0; i < n; i++) {
+        var wx0 = 42.3 + i * (23.3 / n) + 0.08;
+        var grp = Math.floor((i + 1) / 3);                  // groups of ~3 panes share a room
+        var roomLit = hash(grp * 4.1 + 300) < 0.74;
+        var lit = roomLit ? hash(i * 2.9 + 301) < 0.82 : hash(i * 2.9 + 302) < 0.12;
+        var ci = Math.floor(hash(grp * 6.7 + 310) * LITC.length);
+        var inten = (roomLit ? 0.62 : 0.4) + 0.38 * hash(i * 1.7 + 320);
+        pane(wx0 + (23.3 / n - 0.16) / 2, 15.85, 23.3 / n - 0.16, 1.62, lit, i + 300, false, ci, inten);
+      }
+      rect(42.3, 16.62, 65.6, 16.75, "rgba(236,234,228,0.5)");
+      rect(66.6, 14.0, 67.5, 16.2, "rgba(60,70,90,0.35)");
+      if (det) for (Y = 14.7; Y < 16.6; Y += 0.4) line(68.2, Y, 71.0, Y, lw(0.05, 0.5), "rgba(60,70,90,0.25)");
+      // bridge windows: dark (night watch), two instrument-lit panes
+      c.beginPath();
+      c.moveTo(72.4, 15.3); c.lineTo(91.32, 15.3); c.lineTo(91.6, 16.8); c.lineTo(72.4, 16.8); c.closePath();
+      c.fillStyle = grad(c, 0, 15.3, 0, 16.8, [[0, "#0a1119"], [0.6, "#152234"], [1, "#2b3f5c"]]);
+      c.fill();
+      if (det) {
+        for (X = 73.7; X < 91; X += 1.3) line(X, 15.3, X, 16.8, lw(0.1, 0.6), "rgba(220,220,218,0.85)");
+        emit(84.3, 15.35, 85.5, 16.0, "rgba(80,200,180,0.32)");
+        emit(87.0, 15.35, 88.2, 15.9, "rgba(120,170,255,0.26)");
+      }
+      rect(72.4, 16.8, 91.6, 17.0, "rgba(40,50,70,0.35)");
+      // bridge wing + green sidelight screen
+      ao(88.4, 92.6, 15.0, 0.7, 0.35);
+      poly([88.6, 14.95, 92.15, 14.95, 92.55, 17.62, 88.6, 17.62], whiteFill(14.95, 17.62));
+      c.beginPath(); c.moveTo(89.0, 15.4); c.lineTo(92.05, 15.4); c.lineTo(92.33, 16.85); c.lineTo(89.0, 16.85); c.closePath();
+      c.fillStyle = grad(c, 0, 15.4, 0, 16.85, [[0, "#0a1119"], [1, "#2b3f5c"]]); c.fill();
+      if (det) line(90.5, 15.4, 90.5, 16.85, lw(0.1, 0.6), "rgba(220,220,218,0.85)");
+      rect(88.6, 14.95, 92.2, 15.1, "rgba(20,30,50,0.4)");
+      edgeHi(88.6, 92.55, 17.62);
+      rect(90.35, 15.05, 91.2, 15.85, "#20252c");
+
+      rail(38.3, 65.0, 17.6, 1.0);
+      rail(72.0, 91.6, 17.6, 1.0);
+
+      // white box on the roof with satcom dome
+      ao(65.8, 71.7, 17.65, 0.6, 0.25);
+      rect(66.0, 17.6, 71.5, 20.3, whiteFill(17.6, 20.3));
+      edgeHi(66.0, 71.5, 20.3);
+      endShade(66, 71.5, 17.6, 20.3);
+      if (det) for (Y = 18.3; Y < 20; Y += 0.42) line(66.6, Y, 68.9, Y, lw(0.05, 0.5), "rgba(60,70,90,0.3)");
+      c.beginPath(); c.arc(70.3, 21.0, 0.75, 0, 7);
+      c.fillStyle = grad(c, 69.6, 21.6, 71, 20.4, [[0, "#f3f1ec"], [1, "#a3a7ae"]]); c.fill();
+      rect(70.1, 20.3, 70.5, 20.5, "#9aa0aa");
+
+      // whip antennas (dropped on phones)
+      if (!small) {
+        var ant = function (x, y0, y1, w) { line(x, y0, x, y1, lw(w || 0.09, 0.7), "rgba(214,214,212,0.95)"); };
+        ant(30.8, 17.0, 23.0); ant(55.2, 17.6, 22.2); ant(68.6, 20.3, 24.6); ant(81.2, 17.6, 25.2, 0.11);
+        if (det) { ant(47.5, 17.6, 19.6, 0.06); ant(61.8, 17.6, 20.0, 0.06); line(80.6, 23.8, 81.8, 23.8, lw(0.06, 0.5), "rgba(214,214,212,0.9)"); }
+      }
+
+      // aft mast (tapered yellow pylon) – aft masthead light on top
+      var mp = small ? 0.38 : 0;
+      poly([43.0 - mp, 17.6, 44.2 + mp, 17.6, 43.8 + mp * 0.6, 26.75, 43.4 - mp * 0.6, 26.75],
+        grad(c, 43.0 - mp, 0, 44.2 + mp, 0, [[0, COL.yellowLo], [0.55, COL.yellow], [1, COL.yellowHi]]));
+      line(42.3, 24.1, 44.9, 24.1, lw(small ? 0.3 : 0.14, 0.8), COL.yellow);
+      if (det && !small) { line(42.5, 24.1, 43.4, 23.2, lw(0.05, 0.5), COL.yellowLo); line(44.7, 24.1, 43.8, 23.2, lw(0.05, 0.5), COL.yellowLo); }
+      rect(43.3, 26.72, 43.9, 27.25, "#2a2d33");
+      if (!small) line(43.6, 27.25, 43.6, 28.15, lw(0.05, 0.6), "rgba(206,206,204,0.9)");
+
+      // forward radar mast (yellow) – fwd masthead light on top (lower)
+      var rp = small ? 0.35 : 0;
+      poly([77.9 - rp, 17.6, 80.9 + rp, 17.6, 80.0 + rp * 0.6, 21.95, 78.8 - rp * 0.6, 21.95],
+        grad(c, 77.9 - rp, 0, 80.9 + rp, 0, [[0, COL.yellowLo], [0.55, COL.yellow], [1, COL.yellowHi]]));
+      if (det) rect(78.6, 18.0, 79.2, 19.4, "rgba(40,30,10,0.35)");
+      rect(76.6, 19.45 - (small ? 0.12 : 0), 82.2, 19.72, COL.yellow);   // lower platform
+      if (det) rail(76.6, 82.2, 19.72, 0.75);
+      rect(78.9, 19.72, 79.9, 20.05, "#2b2e34");                           // radar pedestal (scanner drawn live)
+      rect(77.5, 21.0 - (small ? 0.12 : 0), 81.3, 21.22, COL.yellow);     // upper platform
+      rect(79.05, 21.22, 79.75, 21.45, "#2b2e34");                         // pedestal (scanner drawn live)
+      rect(79.1, 21.95, 79.7, 22.55, "#2a2d33");
+      if (!small) line(79.4, 22.55, 79.4, 23.2, lw(0.05, 0.6), "rgba(206,206,204,0.9)");
+
+      /* lifeboats in davits */
+      function davit(x, yTop) {
+        line(x, 11.25, x, yTop, lw(0.22, 0.9), COL.steel);
+        line(x, yTop, x + 0.5, yTop - 0.35, lw(0.16, 0.8), COL.steel);
+        ao(x - 0.3, x + 0.4, 11.6, 0.3, 0.15);
+      }
+      function boat(x0, x1, yb, yg, yt, enclosed) {
+        var L2 = x1 - x0;
+        c.beginPath();
+        c.moveTo(x0 + 0.1, yg);
+        c.quadraticCurveTo(x0 + 0.2, yb, x0 + L2 * 0.25, yb);
+        c.lineTo(x1 - L2 * 0.2, yb);
+        c.quadraticCurveTo(x1 - 0.05, yb + 0.1, x1, yg + 0.1);
+        if (enclosed) {
+          c.lineTo(x1 - 0.2, yg + 0.25);
+          c.quadraticCurveTo(x1 - 0.9, yt, x1 - L2 * 0.3, yt);
+          c.lineTo(x0 + L2 * 0.3, yt);
+          c.quadraticCurveTo(x0 + 0.7, yt, x0 + 0.25, yg + 0.25);
+        } else {
+          c.lineTo(x1 - L2 * 0.42, yg + 0.05);
+          c.lineTo(x1 - L2 * 0.45, yt); c.lineTo(x1 - L2 * 0.62, yt); c.lineTo(x1 - L2 * 0.66, yg);
+        }
+        c.closePath();
+        c.fillStyle = grad(c, 0, yb, 0, yt, [[0, COL.orangeLo], [0.5, COL.orange], [1, COL.orangeHi]]);
+        c.fill();
+        line(x0 + 0.25, yg, x1 - 0.1, yg + 0.05, lw(0.1, 0.6), "rgba(120,40,10,0.6)");
+        if (det && enclosed) for (var wx = x0 + L2 * 0.32; wx < x1 - L2 * 0.3; wx += 0.9) rect(wx, yg + 0.45, wx + 0.45, yg + 0.8, "rgba(40,20,10,0.55)");
+        if (!small) {
+          line(x0 + L2 * 0.2, yt, x0 + L2 * 0.2, 15.0, lw(0.04, 0.45), "rgba(40,40,40,0.6)");
+          line(x1 - L2 * 0.2, yt, x1 - L2 * 0.2, 15.0, lw(0.04, 0.45), "rgba(40,40,40,0.6)");
+        }
+      }
+      davit(43.3, 15.35); davit(53.2, 15.35);
+      boat(43.7, 52.8, 11.7, 12.95, 14.5, true);
+      davit(54.3, 14.9); davit(60.2, 14.9);
+      boat(54.6, 59.9, 12.15, 12.95, 13.85, false);
+
+      /* foredeck: small crane, jackstaff */
+      rect(98.0, 10.15, 99.0, 11.9, whiteFill(10.15, 11.9));
+      poly([97.5, 11.9, 99.6, 11.9, 99.4, 12.8, 97.7, 12.8], grad(c, 97.5, 0, 99.6, 0, [[0, COL.yellowLo], [1, COL.yellow]]));
+      poly([99.0, 12.25, 102.6, 11.65, 102.7, 11.95, 99.1, 12.75], COL.yellow);
+      rect(102.3, 10.15, 102.7, 11.65, "rgba(206,206,204,0.9)");
+      if (!small) line(106.55, 10.45, 106.55, 13.6, lw(0.08, 0.7), "rgba(222,222,220,0.95)");
+
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalCompositeOperation = "source-over";
+    }
+
+    /* ============ LIGHTING (only on ship pixels) ============ */
+    var c = c0, i;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    var sxp = ox + sun.X * S, syp = oy - sun.Y * S, srp = Math.max(1, sun.R * S);
+    var dirS = sun.X >= LOA * 0.5 ? 1 : -1;
+
+    // fine paint/steel noise (breaks up the flat CG look)
+    if (det) {
+      var nz = mk(97, 97), nc = nz.getContext("2d"), id = nc.createImageData(97, 97);
+      for (i = 0; i < 97 * 97; i++) {
+        var v = hash(i * 0.731) < 0.5 ? 0 : 255;
+        id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v;
+        id.data[i * 4 + 3] = Math.round(1 + 4 * hash(i * 1.37 + 5));
+      }
+      nc.putImageData(id, 0, 0);
+      c.save(); c.globalCompositeOperation = "source-atop";
+      c.fillStyle = c.createPattern(nz, "repeat"); c.fillRect(0, 0, cw, ch);
+      c.restore();
+    }
+
+    // 1) multiply ambient: cool sky from above, darker toward the waterline,
+    //    darker/cooler away from the sun, warmer toward it, backlit silhouette.
+    var Lc = mk(cw, ch), lc = Lc.getContext("2d");
+    var fy = function (Ym) { return clamp((TOPM - Ym) / (TOPM + BOTM), 0, 1); };
+    var ag = lc.createLinearGradient(0, 0, 0, ch);
+    ag.addColorStop(0, "rgb(248,248,252)");
+    ag.addColorStop(fy(18), "rgb(245,245,249)");
+    ag.addColorStop(fy(12), "rgb(239,239,244)");
+    ag.addColorStop(fy(7), "rgb(226,226,235)");
+    ag.addColorStop(fy(3), "rgb(172,173,190)");
+    ag.addColorStop(1, "rgb(112,114,136)");
+    lc.fillStyle = ag; lc.fillRect(0, 0, cw, ch);
+    // away from the sun: cooler, dimmer (the aft end sits in blue night light)
+    var fg = lc.createLinearGradient(sxp - dirS * 1.25 * LOA * S, 0, sxp - dirS * 0.15 * LOA * S, 0);
+    fg.addColorStop(0, "rgba(64,76,120,0.34)"); fg.addColorStop(1, "rgba(64,76,120,0)");
+    lc.fillStyle = fg; lc.fillRect(0, 0, cw, ch);
+    // toward the sun: warmer (multiplying by a peach tone removes some blue)
+    var wg = lc.createRadialGradient(sxp, syp, 0, sxp, syp, 1.0 * LOA * S);
+    wg.addColorStop(0, "rgba(255,198,150,0.55)"); wg.addColorStop(0.4, "rgba(255,214,176,0.24)"); wg.addColorStop(1, "rgba(255,226,196,0)");
+    lc.fillStyle = wg; lc.fillRect(0, 0, cw, ch);
+    // backlit silhouette – only as strong as the part of the disc that is actually visible
+    var vis = sunVisible(sun), sil = clamp(vis * 2.2, 0, 1);
+    if (sil > 0.02) {
+      var bg = lc.createRadialGradient(sxp, syp, 0, sxp, syp, srp * 1.5);
+      bg.addColorStop(0, "rgba(30,30,46," + (0.94 * sil).toFixed(3) + ")");
+      bg.addColorStop(0.62, "rgba(30,30,46," + (0.9 * sil).toFixed(3) + ")");
+      bg.addColorStop(0.8, "rgba(50,48,66," + (0.45 * sil).toFixed(3) + ")");
+      bg.addColorStop(1, "rgba(50,48,66,0)");
+      lc.fillStyle = bg; lc.fillRect(0, 0, cw, ch);
+    }
+    lc.globalCompositeOperation = "destination-in"; lc.drawImage(cv, 0, 0);
+    c.globalCompositeOperation = "multiply"; c.drawImage(Lc, 0, 0);
+    c.globalCompositeOperation = "source-over";
+
+    // 2) faint sky sheen on the black hull (screen, under the band)
+    c.save();
+    c.setTransform(S, 0, 0, -S, ox, oy);
+    hullPath(c); c.clip();
+    c.beginPath();
+    for (var X = -1; X <= LOA + 1; X += 2) c.lineTo(X, bandBot(X));
+    c.lineTo(LOA + 1, -2); c.lineTo(-1, -2); c.closePath(); c.clip();
+    c.globalCompositeOperation = "screen";
+    c.fillStyle = grad(c, 0, 0, 0, 5.4, [[0, "rgba(40,55,90,0)"], [0.5, "rgba(60,78,115,0.08)"], [0.85, "rgba(95,115,160,0.16)"], [1, "rgba(120,140,185,0.2)"]]);
+    c.fillRect(-1, -2, LOA + 3, 10);
+    c.restore();
+
+    // 3) emissive windows back at full strength (not darkened by the ambient)
+    c.drawImage(E, 0, 0);
+
+    // 4) screen halo of the low sun on ship parts near the disc
+    var Hc = mk(cw, ch), hc = Hc.getContext("2d");
+    var hk = 0.35 + 0.65 * sil;
+    var hg = hc.createRadialGradient(sxp, syp, srp * 0.2, sxp, syp, srp * 2.3);
+    hg.addColorStop(0, "rgba(255,156,90," + (0.24 * hk).toFixed(3) + ")");
+    hg.addColorStop(0.35, "rgba(255,146,84," + (0.1 * hk).toFixed(3) + ")");
+    hg.addColorStop(0.7, "rgba(240,120,70," + (0.03 * hk).toFixed(3) + ")");
+    hg.addColorStop(1, "rgba(240,120,70,0)");
+    hc.fillStyle = hg; hc.fillRect(0, 0, cw, ch);
+    // keep the halo off the black lower hull (no orange bounce down there)
+    hc.globalCompositeOperation = "destination-out";
+    hc.fillStyle = grad(hc, 0, oy - 7 * S, 0, oy, [[0, "rgba(0,0,0,0)"], [0.6, "rgba(0,0,0,0.6)"], [1, "rgba(0,0,0,0.85)"]]);
+    hc.fillRect(0, oy - 7 * S, cw, ch);
+    hc.globalCompositeOperation = "destination-in"; hc.drawImage(cv, 0, 0);
+    c.globalCompositeOperation = "screen"; c.drawImage(Hc, 0, 0);
+    c.globalCompositeOperation = "source-over";
+
+    // 4b) light wrap: the visible part of the disc (upper half, above the
+    //     horizon) blurred and spilled a few pixels into the silhouette edges
+    //     that stand in front of it – this is what makes a backlit object read.
+    if (sil > 0.02) {
+      var D = mk(cw, ch), dc = D.getContext("2d");
+      dc.fillStyle = "rgb(255,160,92)";
+      dc.beginPath(); dc.arc(sxp, syp, srp, Math.PI, 0); dc.closePath(); dc.fill();
+      dc.globalCompositeOperation = "destination-out"; dc.drawImage(cv, 0, 0);
+      var bf = Math.max(4, Math.min(14, 1.1 * S));           // blur radius ≈ 1.1 m, 4–14 device px
+      var dw = Math.max(1, Math.round(cw / bf)), dh = Math.max(1, Math.round(ch / bf));
+      var d1 = mk(cw / 2, ch / 2), d1c = d1.getContext("2d");
+      d1c.imageSmoothingEnabled = true; d1c.drawImage(D, 0, 0, d1.width, d1.height);
+      var d2 = mk(dw, dh), d2c = d2.getContext("2d");
+      d2c.imageSmoothingEnabled = true; d2c.drawImage(d1, 0, 0, dw, dh);
+      var Wr = mk(cw, ch), wr = Wr.getContext("2d");
+      wr.imageSmoothingEnabled = true;
+      try { wr.imageSmoothingQuality = "high"; } catch (e) { /* older browsers */ }
+      wr.drawImage(d2, 0, 0, cw, ch);
+      wr.globalCompositeOperation = "destination-in"; wr.drawImage(cv, 0, 0);
+      c.save(); c.globalCompositeOperation = "lighter"; c.globalAlpha = 0.95 * sil;
+      c.drawImage(Wr, 0, 0); c.drawImage(Wr, 0, 0);
+      c.restore();
+    }
+
+    // 5) rim light: only silhouette edges facing the sun, fading out ~0.3·LOA from the disc
+    var rimR = srp + 0.3 * LOA * S;
+    var warmFill = function (rc) {
+      var g = rc.createRadialGradient(sxp, syp, 0, sxp, syp, rimR);
+      g.addColorStop(0, "rgba(255,226,176,1)");
+      g.addColorStop(Math.min(0.9, srp / rimR), "rgba(255,198,130,0.95)");
+      g.addColorStop(1, "rgba(255,170,100,0)");
+      return g;
+    };
+    var mask = mk(cw, ch); mask.getContext("2d").drawImage(cv, 0, 0);
+    rimPass(mask, c, dirS, 0, Math.max(1, Math.min(2.6, 0.12 * S)), warmFill, 0.95);
+    rimPass(mask, c, 0, -1, Math.max(1, Math.min(2.0, 0.09 * S)), warmFill, 0.7);
+    rimPass(mask, c, 0, -1, Math.max(1, Math.min(1.5, 0.06 * S)), function () { return "rgba(178,200,236,0.55)"; }, 0.3);
+
+    // 6) bloom: lit windows, downsampled once, added on top
+    var lvl = E, w2 = cw, h2 = ch, levels = [];
+    for (i = 0; i < 4 && w2 > 24; i++) {
+      w2 = Math.ceil(w2 / 2); h2 = Math.ceil(h2 / 2);
+      var nb = mk(w2, h2), nx = nb.getContext("2d");
+      nx.imageSmoothingEnabled = true;
+      nx.drawImage(lvl, 0, 0, w2, h2);
+      lvl = nb; if (i >= 1) levels.push(nb);
+    }
+    c.save();
+    c.globalCompositeOperation = "lighter"; c.imageSmoothingEnabled = true;
+    try { c.imageSmoothingQuality = "high"; } catch (e) { /* older browsers */ }
+    var BA = [0.3, 0.28, 0.22];
+    for (i = 0; i < levels.length; i++) { c.globalAlpha = BA[i] || 0.2; c.drawImage(levels[i], 0, 0, cw, ch); }
+    c.restore();
+
+    return { cv: cv, E: E, cw: cw, ch: ch, ox: ox, oy: oy, S: S };
+  }
+
+  function rimPass(src, c, ux, uy, off, fillFn, alpha) {
+    var r = mk(src.width, src.height), rc = r.getContext("2d");
+    rc.drawImage(src, 0, 0);
+    rc.globalCompositeOperation = "destination-out";
+    rc.drawImage(src, -ux * off, -uy * off);
+    rc.globalCompositeOperation = "source-in";
+    rc.fillStyle = fillFn(rc);
+    rc.fillRect(0, 0, r.width, r.height);
+    c.save();
+    c.globalAlpha = alpha;
+    c.drawImage(r, 0, 0);
+    c.restore();
+  }
+
+  /* reflection source: mirrored, blurred, darkened; reflection dpr capped at 2 */
+  function renderReflection(ship, dpr) {
+    var RS = 0.5 * Math.min(1, 2 / dpr);                 // refl px per ship px
+    var S = ship.S, oy = ship.oy;
+    var rh = Math.ceil(oy * 0.66 * RS);
+    var r = mk(ship.cw * RS, rh), c = r.getContext("2d");
+    c.setTransform(RS, 0, 0, -RS, 0, oy * RS);
+    var hasF = "filter" in c;
+    if (hasF) c.filter = "blur(" + Math.max(0.8, S * RS * 0.16).toFixed(2) + "px)";
+    c.drawImage(ship.cv, 0, 0);
+    // smear the band over the «GANN» letters so no mirrored name can be read
+    var sx0 = (AFTM + 79.4) * S, sw = 5.8 * S;
+    var syTop = oy - (bandTop(82) + 0.35) * S, sh = (bandTop(82) - bandBot(82) + 0.7) * S;
+    var dyTop = oy - (bandTop(88.2) + 0.35) * S;
+    c.drawImage(ship.cv, sx0, syTop, sw, sh, (AFTM + 85.2) * S, dyTop, sw, sh);
+    if (hasF) c.filter = "none";
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-atop";
+    c.fillStyle = "rgba(6,18,40,0.48)"; c.fillRect(0, 0, r.width, rh);
+    // lit windows reflect as short vertical warm streaks (smeared away from the waterline)
+    c.globalCompositeOperation = "lighter";
+    c.setTransform(RS, 0, 0, -RS, 0, oy * RS);
+    if (hasF) c.filter = "blur(" + Math.max(0.7, S * RS * 0.12).toFixed(2) + "px)";
+    var st = 0.32 * S;
+    for (var i = 0; i < 6; i++) {
+      c.globalAlpha = 0.34 * (1 - i / 6);
+      c.drawImage(ship.E, 0, -i * st);
+    }
+    if (hasF) c.filter = "none";
+    c.globalAlpha = 1;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "source-over";
+    return { cv: r, scale: RS * dpr };                   // refl px per CSS px
+  }
+
+  function makeSprites() {
+    function glow(col, stops) {
+      var s = mk(64, 64), c = s.getContext("2d");
+      var g = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+      for (var i = 0; i < stops.length; i++) g.addColorStop(stops[i][0], stops[i][1].replace("C", col));
+      c.fillStyle = g; c.fillRect(0, 0, 64, 64);
+      return s;
+    }
+    return {
+      foam: glow("222,232,244", [[0, "rgba(C,0.95)"], [0.45, "rgba(C,0.45)"], [1, "rgba(C,0)"]]),
+      foamWarm: glow("255,236,214", [[0, "rgba(C,0.95)"], [0.45, "rgba(C,0.45)"], [1, "rgba(C,0)"]]),
+      white: glow("255,244,214", [[0, "rgba(C,0.9)"], [0.12, "rgba(C,0.55)"], [0.35, "rgba(C,0.16)"], [1, "rgba(C,0)"]]),
+      green: glow("55,214,127", [[0, "rgba(C,0.9)"], [0.12, "rgba(C,0.55)"], [0.35, "rgba(C,0.16)"], [1, "rgba(C,0)"]])
+    };
+  }
+
+  /* gradients in local metre space (ctx translated to stern/WL and scaled by k):
+     created once per target context, reused every frame */
+  function sharedGrads(ctx) {
+    if (shared.ctx === ctx) return shared;
+    shared.ctx = ctx;
+    var cs = ctx.createLinearGradient(0, 0, 0, 1.0);
+    cs.addColorStop(0, "rgba(2,6,14,0.55)"); cs.addColorStop(1, "rgba(2,6,14,0)");
+    shared.contact = cs;
+    var wk = ctx.createLinearGradient(10, 0, -56, 0);
+    wk.addColorStop(0, "rgba(218,230,244,0)");
+    wk.addColorStop(0.1, "rgba(218,230,244,0.44)");
+    wk.addColorStop(0.32, "rgba(206,222,242,0.25)");
+    wk.addColorStop(0.68, "rgba(196,214,238,0.09)");
+    wk.addColorStop(1, "rgba(196,214,238,0)");
+    shared.wake = wk;
+    var fg = ctx.createLinearGradient(-2, 0, 104, 0);
+    fg.addColorStop(0, "rgba(205,222,240,0.0)");
+    fg.addColorStop(0.08, "rgba(205,222,240,0.3)");
+    fg.addColorStop(0.75, "rgba(212,226,242,0.26)");
+    fg.addColorStop(1, "rgba(225,236,248,0.6)");
+    shared.foamBand = fg;
+    return shared;
+  }
+
+  /* ------------------------------------------------------------------ */
+  window.drawGann = function (ctx, o) {
+    if (!o || !(o.len > 30)) return;
+    var len = o.len, k = len / LOA;
+    var tf = ctx.getTransform ? ctx.getTransform() : null;
+    var dpr = tf ? Math.sqrt(tf.a * tf.a + tf.b * tf.b) : 1;
+    if (!(dpr > 0)) dpr = 1;
+    var S = k * dpr, small = len < 300;
+    var x = o.x, y = o.y;
+    var hasSun = o.sunX != null;
+    var sunX = hasSun ? o.sunX : x + len * 1.2;
+    var sunY = o.sunY != null ? o.sunY : y;
+    var sunR = o.sunR > 0 ? o.sunR : len * 0.17;
+    // sun in ship metres (Y up from the waterline), bucketed for the cache key
+    var sun = {
+      X: Math.round(clamp((sunX - x) / k, -90, 220) / 2) * 2,
+      Y: Math.round(clamp((y - sunY) / k, -40, 80)),
+      R: Math.max(1, Math.round(sunR / k))
+    };
+    var key = Math.round(len * 4) + "|" + dpr.toFixed(3) + "|" + sun.X + "|" + sun.Y + "|" + sun.R;
+    if (cache.key !== key) {
+      cache.ship = renderShip(S, sun, small);
+      cache.refl = renderReflection(cache.ship, dpr);
+      cache.key = key;
+    }
+    if (!sprites) sprites = makeSprites();
+    var G = sharedGrads(ctx);
+    var sh = cache.ship, refl = cache.refl.cv, rsc = cache.refl.scale;
+    var still = !!o.reduceMotion;
+    var t = still ? 2.5 : (o.t || 0);
+    var bob = still ? 0 : Math.sin(t * 0.85) * 1.2;
+    var pitch = still ? 0 : Math.sin(t * 0.62 + 0.8) * 0.14 * DEG;
+    var i, j, p, X, Y, w, h;
+    var nearSun = function (px) { return Math.exp(-Math.pow((px - sunX) / (len * 0.3), 2)); };
+
+    ctx.save();
+
+    /* ---- reflection: perspective bands that grow with depth, some broken
+            into sky-coloured facets ---- */
+    var rx0 = x - AFTM * k, rw = sh.cw / dpr;
+    var Dmax = refl.height / rsc;                          // CSS px
+    var ph = still ? 0 : t;
+    var h0 = Math.max(1.25, 0.1 * k), sm = 2.4 * k;
+    var d = 0, src = 0, n = 0;
+    var ry0 = y + 0.5 - bob * 0.4;
+    while (d < Dmax && n < 90) {
+      var hh = h0 * (1 + d / sm);
+      var u = d / k;                                       // depth in metres
+      var fall = 1 - d / Dmax;
+      var dx = (Math.sin(u * 1.9 - ph * 1.6) + 0.8 * Math.sin(u * 0.73 + ph * 0.9 + 1.3)) * (0.35 + u * 0.15) * k * 0.1;
+      var facet = Math.sin(u * 1.37 + ph * 1.2) + 0.7 * Math.sin(u * 3.1 - ph * 1.7);
+      var a = 0.62 * Math.pow(fall, 1.25) * (facet > 1.05 ? 0.16 : 0.8 + 0.2 * Math.sin(u * 2.3 + ph * 2.1));
+      if (d < 2) a = Math.max(a, 0.55);
+      var srcH = hh * 1.05;
+      var sy = src * rsc, shh = Math.min(srcH * rsc, refl.height - sy);
+      if (shh > 0.3 && a > 0.01) {
+        ctx.globalAlpha = a;
+        ctx.drawImage(refl, 0, sy, refl.width, shh, rx0 + dx, ry0 + d, rw, hh + 0.6);
+      }
+      if (facet > 1.25 && fall > 0.15) {                   // sky glint on the facing facets
+        ctx.globalAlpha = 0.07 * fall;
+        ctx.fillStyle = "#9fbbe0";
+        ctx.fillRect(x + (2 + 6 * hash(n)) * k + dx, ry0 + d, (88 - 10 * hash(n + 7)) * k, Math.max(1, hh * 0.3));
+      }
+      d += hh; src += srcH; n++;
+    }
+    ctx.globalAlpha = 1;
+
+    /* ---- local metre space at the stern waterline: contact shadow + wake ---- */
+    var tt = t;
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(k, k);
+    ctx.fillStyle = G.contact;
+    ctx.fillRect(2, 0, LOA - 6, 1.0);
+    // long translucent wake wedge spreading aft and toward the viewer
+    var sw1 = still ? 0 : Math.sin(tt * 0.9) * 0.12, sw2 = still ? 0 : Math.sin(tt * 1.3 + 1) * 0.18;
+    // three nested wedges → soft edges, denser along the centre of the wake
+    ctx.fillStyle = G.wake;
+    for (j = 0; j < 3; j++) {
+      var wq = 1 - j * 0.3, wc = 0.2 + 1.9 * 0.5;           // centre line offset at the far end
+      ctx.beginPath();
+      ctx.moveTo(10, 0.2);                                  // tapers to a point under the stern
+      ctx.quadraticCurveTo(-12, 0.5 - 1.3 * wq + sw1, -56, wc + 0.6 - (wc + 1.15) * wq);
+      ctx.lineTo(-56, wc + 0.6 + (5.2 - wc - 0.6) * wq + sw2);
+      ctx.quadraticCurveTo(-18, 0.5 + 3.1 * wq + sw2, 10, 0.2);
+      ctx.closePath();
+      ctx.globalAlpha = 0.5; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // turbulent streaks inside the wake (the near arm brightest)
+    ctx.strokeStyle = G.wake; ctx.lineWidth = Math.max(0.9 / k, 0.13);
+    for (j = 0; j < 4; j++) {
+      ctx.beginPath();
+      for (X = 6; X >= -48; X -= 2) {
+        var f0 = 0.12 + 0.27 * j, sp = (6 - X) / 62;
+        Y = -0.4 * (1 - f0) * sp * 2 + (0.35 + 4.4 * sp) * f0 + 0.12 * Math.sin(X * 0.8 + j * 2 + tt * 1.6);
+        if (X === 6) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+      }
+      ctx.globalAlpha = j === 3 ? 1 : 0.85; ctx.stroke();
+    }
+    // foam flecks drifting aft and spreading (batched in three alpha bins)
+    var bins = [[], [], []];
+    for (i = 0; i < 72; i++) {
+      p = (i * 0.618034 + tt * 0.045) % 1;
+      X = 6 - p * 52;
+      var vv = hash(i + 700);
+      Y = -0.1 + (vv - 0.15) * (0.6 + 4.4 * p);
+      w = (0.7 + 1.5 * hash(i + 740)) * (1 + 1.4 * p);
+      h = 0.16 + 0.16 * p;
+      var fa = Math.pow(1 - p, 1.3) * (still ? 0.75 : 0.55 + 0.45 * Math.sin(tt * 1.7 + i * 2.1));
+      if (fa < 0.08) continue;
+      bins[fa > 0.6 ? 2 : fa > 0.3 ? 1 : 0].push(X, Y, w, h);
+    }
+    var binA = [0.2, 0.38, 0.6];
+    ctx.fillStyle = "#dce8f6";
+    for (j = 0; j < 3; j++) {
+      var B = bins[j];
+      if (!B.length) continue;
+      ctx.beginPath();
+      for (var m = 0; m < B.length; m += 4) { ctx.moveTo(B[m] + B[m + 2] / 2, B[m + 1]); ctx.ellipse(B[m], B[m + 1], B[m + 2] / 2, B[m + 3] / 2, 0, 0, 6.2832); }
+      ctx.globalAlpha = binA[j]; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    /* ---- ship (pitched / bobbing), clipped at the water surface ---- */
+    var pcx = x + len * 0.5, pcy = y + bob;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x - 4 * k, y - (TOPM + 2) * k, len + 8 * k, (TOPM + 2) * k + 0.6); ctx.clip();
+    ctx.translate(pcx, pcy); ctx.rotate(pitch);
+    ctx.drawImage(sh.cv, -len * 0.5 - AFTM * k, -TOPM * k, sh.cw / dpr, sh.ch / dpr);
+    // live rotating radar scanners on the yellow radar mast
+    var th1 = still ? 0.5 : t * 2.6, th2 = still ? 1.9 : t * 2.1 + 1.3;
+    var rx = -len * 0.5 + 79.4 * k;
+    var scn = [[20.22, 3.3, 0.33, th1], [21.58, 1.8, 0.25, th2]];
+    var warmR = 0.25 + 0.6 * nearSun(x + 79.4 * k);
+    for (j = 0; j < 2; j++) {
+      var R0 = scn[j], cth = Math.cos(R0[3]);
+      var hl = Math.max(0.14, Math.abs(cth)) * R0[1] * k, hw = Math.max(small ? 1.1 : 0.8, R0[2] * k);
+      var cy = -R0[0] * k - hw / 2;
+      ctx.fillStyle = "#16181d";
+      ctx.fillRect(rx - hl, cy, hl * 2, hw);
+      ctx.fillStyle = "rgba(255,196,140," + (warmR * (0.35 + 0.35 * Math.abs(Math.sin(R0[3])))).toFixed(3) + ")";
+      ctx.fillRect(rx - hl, cy, hl * 2, Math.max(0.5, hw * 0.35));
+    }
+    ctx.restore();
+
+    /* ---- foam: bow wave, hull-side foam, propeller wash ---- */
+    var fs = sprites.foam, fw = sprites.foamWarm;
+    var warmZone = Math.max(60, sunR * 1.3);
+    function blob(Xm, Ym, wm, hm, al) {
+      if (al <= 0.01) return;
+      var px = x + Xm * k, py = y - Ym * k;
+      var ww = Math.max(3, wm * k), hh2 = Math.max(1.6, hm * k);
+      ctx.globalAlpha = Math.min(1, al);
+      ctx.drawImage(Math.abs(px - sunX) < warmZone ? fw : fs, px - ww / 2, py - hh2 / 2, ww, hh2);
+    }
+    // translucent white-water band along the waterline (thick at the bow)
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(k, k);
+    ctx.beginPath();
+    ctx.moveTo(103.6, 0);
+    for (X = 102; X >= -2; X -= 2) {
+      var e = Math.exp(-(103.3 - X) / 13);
+      var wig = Math.sin(X * 0.7 + tt * 3.1) * 0.09 + Math.sin(X * 1.9 - tt * 4.3) * 0.05;
+      ctx.lineTo(X, -(0.2 + 1.0 * e + wig + (X < 7 ? 0.25 * Math.exp(-Math.pow((X - 2) / 3, 2)) : 0)));
+    }
+    for (X = -2; X <= 102; X += 2) {
+      var e2 = Math.exp(-(103.3 - X) / 16);
+      ctx.lineTo(X, 0.12 + 0.22 * e2 + (X < 6 ? (6 - X) * 0.03 : 0) + 0.5 / k);
+    }
+    ctx.closePath();
+    ctx.fillStyle = G.foamBand; ctx.fill();
+    ctx.restore();
+    // hull-side foam running aft
+    for (i = 0; i < 26; i++) {
+      p = (i / 26 + tt * 0.05) % 1;
+      X = 100 - p * 97;
+      var hf = 0.35 + 0.65 * Math.pow(1 - p, 0.6);
+      blob(X, 0.12 + 0.25 * hf * hash(i + 2), 3.6 + hash(i) * 2.4, 0.5 + 0.5 * hf, (0.3 + 0.35 * hf) * (0.8 + 0.2 * Math.sin(tt * 2 + i)));
+    }
+    // spreading bow wave (moustache)
+    for (i = 0; i < 30; i++) {
+      p = (i * 0.618034 + tt * 0.3) % 1;
+      X = 102.6 - p * 40;
+      Y = Math.pow(1 - p, 2.2) * (0.9 + 0.7 * hash(i + 5)) + 0.08 - p * 0.9 * hash(i + 9);
+      blob(X, Y, 1.8 + 4.2 * p, 0.55 + 0.6 * (1 - p), 0.95 * Math.pow(1 - p, 1.15));
+    }
+    // white water climbing the stem
+    for (i = 0; i < 14; i++) {
+      var fl = still ? 0.8 : 0.65 + 0.35 * Math.sin(tt * 7 + i * 2.1);
+      var hy = hash(i + 30) * (0.6 + 0.4 * fl);
+      blob(102.3 + hy * 0.55 + (hash(i + 20) - 0.6) * 1.2, 0.2 + hy * 1.9, 1.0 + hash(i + 40) * 0.8, 0.75, 0.95 * fl);
+    }
+    // propeller wash: churning mound at the stern, stronger than before
+    blob(1.5, 0.1, 11, 1.8, 0.5);
+    for (i = 0; i < 22; i++) {
+      var fl2 = still ? 0.7 : 0.55 + 0.45 * Math.sin(tt * 5.3 + i * 1.7);
+      var q = still ? hash(i + 90) : (hash(i + 90) + tt * 0.35) % 1;
+      // churn drifts aft and spreads toward the viewer (down on screen)
+      blob(5 - q * 16 + hash(i + 50) * 3, 0.35 - hash(i + 60) * (0.6 + 2.2 * q), 2.2 + hash(i + 70) * 2.4 + q * 2.4, 0.75 + 0.35 * q, (0.9 - 0.55 * q) * fl2);
+    }
+    ctx.globalAlpha = 1;
+
+    /* ---- navigation lights: reflection streaks, glow, cores ---- */
+    var cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+    var coreMin = small ? 1.7 : 1.3;
+    for (i = 0; i < LIGHTS.length; i++) {
+      var Lt = LIGHTS[i];
+      var dx0 = (x + Lt.X * k) - pcx, dy0 = -Lt.Y * k;
+      var lx = pcx + dx0 * cosP - dy0 * sinP;
+      var ly = pcy + dx0 * sinP + dy0 * cosP;
+      var spr = Lt.c === LIGHT_GREEN ? sprites.green : sprites.white;
+      ctx.fillStyle = Lt.c;
+      var depth = Lt.Y * k * 0.85;
+      for (j = 0; j < 10; j++) {
+        var fj = j / 9;
+        var sh1 = still ? 0.75 - 0.25 * hash(j + i * 10) : 0.55 + 0.45 * Math.sin(tt * 2.6 + j * 1.9 + i * 3.1);
+        var yy = y + 3 + Math.pow(fj, 1.2) * depth;
+        var ww2 = Math.max(4, 1.0 * k) * (0.6 + 1.4 * fj) * sh1;
+        var xo = (still ? Math.sin(j * 2.3) : Math.sin(tt * 1.7 + j * 0.8 + i)) * 0.45 * k * fj;
+        ctx.globalAlpha = 0.85 * (1 - fj * 0.75) * sh1 * Lt.s;
+        ctx.fillRect(lx - ww2 / 2 + xo, yy, ww2, Math.max(1.3, 0.2 * k));
+      }
+      ctx.globalAlpha = 0.22 * Lt.s;
+      ctx.drawImage(spr, lx - Math.max(6, 1.4 * k), y + 1, Math.max(12, 2.8 * k), depth * 0.9);
+      var fl3 = still ? 1 : 0.94 + 0.06 * Math.sin(tt * 11 + i * 2);
+      var R = Math.max(9, 1.7 * k) * Lt.s;
+      ctx.globalAlpha = 0.85 * fl3;
+      ctx.drawImage(spr, lx - R, ly - R, R * 2, R * 2);
+      var R2 = Math.max(20, 5 * k) * Lt.s;
+      ctx.globalAlpha = 0.34 * fl3;
+      ctx.drawImage(spr, lx - R2, ly - R2, R2 * 2, R2 * 2);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = Lt.c;
+      ctx.beginPath(); ctx.arc(lx, ly, Math.max(coreMin, 0.24 * k), 0, 7); ctx.fill();
+      ctx.fillStyle = Lt.core;
+      ctx.beginPath(); ctx.arc(lx, ly, Math.max(coreMin * 0.55, 0.12 * k), 0, 7); ctx.fill();
+    }
+
+    /* ---- small sun glints on the water along the hull ---- */
+    if (hasSun) {
+      ctx.fillStyle = "#ffc58a";
+      for (i = 0; i < 14; i++) {
+        var gxm = x + (hash(i + 200) * 1.3 - 0.15) * len;
+        if (Math.abs(gxm - sunX) > warmZone * 1.2) continue;
+        var tw = still ? 0.5 : Math.max(0, Math.sin(tt * (1.5 + hash(i) * 2) + i * 4));
+        ctx.globalAlpha = 0.7 * tw;
+        ctx.fillRect(gxm, y + 2 + hash(i + 220) * 0.06 * len, Math.max(2, 0.5 * k) * (0.5 + tw), 1.2);
+      }
+    }
+    ctx.restore();
+  };
+})();
+
+</script>
+<script>
 /* Sjømannen – interaktive deler */
 (function () {
   "use strict";
@@ -1915,6 +2939,8 @@ footer.site-foot {
     if (!canvas) return;
     var ctx = canvas.getContext("2d");
     var w = 0, h = 0, dpr = 1, start = performance.now();
+    // plassering av MS Gann som andel av lerretet (y regnes fra horisonten)
+    var GANN = { x: 0.05, len: 0.62, y: 0.022 };
 
     function resize() {
       var r = canvas.getBoundingClientRect();
@@ -1923,16 +2949,6 @@ footer.site-foot {
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-
-    function glow(x, y, r, color, alpha) {
-      var g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, color);
-      g.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
     }
 
     function draw(now) {
@@ -1988,45 +3004,15 @@ footer.site-foot {
         ctx.stroke();
       }
 
-      // fartøy sett forfra, med lysene som tennes ett for ett
-      var cx = w * 0.36, by = horizon + 2, s = Math.min(w, h) / 300;
-      var bob = reduceMotion ? 0 : Math.sin(t * 1.2) * 1.5;
-      ctx.save();
-      ctx.translate(cx, by + bob);
-      ctx.fillStyle = "#0d2347";
-      ctx.strokeStyle = "rgba(169,203,235,0.55)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(-22 * s, 0); ctx.lineTo(22 * s, 0); ctx.lineTo(28 * s, -14 * s); ctx.lineTo(-28 * s, -14 * s); ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.fillRect(-14 * s, -34 * s, 28 * s, 20 * s);
-      ctx.strokeRect(-14 * s, -34 * s, 28 * s, 20 * s);
-      ctx.fillStyle = "rgba(169,203,235,0.55)";
-      ctx.fillRect(-1.2 * s, -78 * s, 2.4 * s, 44 * s);
-      ctx.restore();
-
-      var on = function (delay) { return reduceMotion ? 1 : Math.max(0, Math.min(1, (t - delay) / 0.5)); };
-      var lights = [
-        { x: 0, y: -78, c: COLORS.white, d: 0.3 },   // akterste topplanterne, høyest
-        { x: 0, y: -56, c: COLORS.white, d: 0.6 },   // forreste topplanterne
-        { x: -24, y: -18, c: COLORS.green, d: 0.9 }, // styrbord sidelanterne (til venstre sett forfra)
-        { x: 24, y: -18, c: COLORS.red, d: 1.1 }     // babord sidelanterne
-      ];
-      lights.forEach(function (L) {
-        var a = on(L.d);
-        if (!a) return;
-        var lx = cx + L.x * s, ly = by + bob + L.y * s;
-        glow(lx, ly, 16 * s, L.c, 0.55 * a);
-        ctx.globalAlpha = a; ctx.fillStyle = L.c;
-        ctx.beginPath(); ctx.arc(lx, ly, 2.6 * s, 0, Math.PI * 2); ctx.fill();
-        // refleks i vannet
-        ctx.globalAlpha = 0.28 * a;
-        for (var r = 0; r < 6; r++) {
-          var ry = by + 6 + r * 6 * s;
-          var wob = reduceMotion ? 0 : Math.sin(t * 2 + r + L.x) * 2;
-          ctx.fillRect(lx - 2 * s + wob, ry, 4 * s, 2);
-        }
-        ctx.globalAlpha = 1;
-      });
+      // MS Gann sett fra styrbord (tegnet i gann-ship.js), med lanternene
+      // for maskindrevet fartøy over 50 m: to topplanterner og grønn sidelanterne
+      if (typeof window.drawGann === "function") {
+        window.drawGann(ctx, {
+          x: w * GANN.x, y: horizon + h * GANN.y, len: w * GANN.len,
+          t: t, reduceMotion: reduceMotion,
+          sunX: sunX, sunY: horizon, sunR: sunR
+        });
+      }
 
       if (!reduceMotion) requestAnimationFrame(draw);
     }
