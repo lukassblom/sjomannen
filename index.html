@@ -493,6 +493,46 @@ a:hover { color: var(--acc); }
   transition: background-color 0.15s, color 0.15s;
 }
 .scene__toggle:hover, .scene__toggle[aria-pressed="true"] { background: var(--acc); color: var(--on-acc); border-color: var(--acc); }
+
+/* Introfilmen: dekker hele vinduet første gang siden åpnes i et besøk */
+.intro { display: none; }
+.intro-on .intro {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: block;
+  background: var(--page);
+  transition: opacity 0.6s ease, visibility 0s linear 0.6s;
+}
+.intro-on body { overflow: hidden; }
+.intro.is-closing { opacity: 0; visibility: hidden; }
+.intro__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--page);
+}
+/* På høye, smale skjermer får hele bildet plass, så tittelkortet ikke kuttes */
+@media (max-aspect-ratio: 4/3) { .intro__video { object-fit: contain; } }
+.intro__skip {
+  position: absolute;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  font: 700 0.78rem/1 var(--f-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: rgba(6, 18, 38, 0.72);
+  border: var(--bw) solid var(--ink);
+  padding: 11px 14px;
+  min-height: 44px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+.intro__skip:hover, .intro__skip:focus-visible { background: var(--acc); color: var(--on-acc); border-color: var(--acc); }
+.intro__skip:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
 .scene .caption {
   position: absolute;
   left: 0; right: 0; bottom: 0;
@@ -1062,7 +1102,19 @@ footer.site-foot {
 }
 
 </style>
-<script>document.documentElement.classList.add('js');</script>
+<script>
+document.documentElement.classList.add('js');
+/* Introfilmen vises én gang per besøk, bare på forsiden og ikke ved «redusert bevegelse». */
+(function () {
+  try {
+    if (/[?&]intro\b/.test(location.search)) { document.documentElement.classList.add('intro-on'); return; }  /* ?intro viser den alltid */
+    if (location.hash && location.hash !== '#top') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    if (sessionStorage.getItem('sjomannen-intro') === 'sett') return;
+    document.documentElement.classList.add('intro-on');
+  } catch (e) { /* uten sessionStorage hopper vi over introen */ }
+})();
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0d2347">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -1079,6 +1131,13 @@ footer.site-foot {
 </style>
 </head>
 <body>
+
+<div class="intro" id="intro" role="dialog" aria-modal="true" aria-label="Introfilm: MS Gann åpner bildekket">
+  <video class="intro__video" id="introVideo" muted playsinline preload="auto" poster="sjomannen-intro-poster.jpg" aria-hidden="true">
+    <source src="sjomannen-intro.mp4" type="video/mp4">
+  </video>
+  <button type="button" class="intro__skip" id="introSkip">Hopp over <span aria-hidden="true">→</span></button>
+</div>
 
 <header class="header">
   <div class="wrap header__in">
@@ -2757,6 +2816,50 @@ footer.site-foot {
     if (html != null) n.innerHTML = html;
     return n;
   }
+
+  /* Introfilmen: MS Gann åpner bildekket og boka «Sjømannen» åpner siden.
+     Skriptet i <head> setter .intro-on når den skal vises (én gang per besøk). */
+  (function () {
+    var root = document.documentElement, box = $("#intro");
+    if (!box) return;
+    if (!root.classList.contains("intro-on")) { box.parentNode.removeChild(box); return; }
+    var video = $("#introVideo"), skip = $("#introSkip"), done = false;
+
+    function finish() {
+      root.classList.remove("intro-on");
+      if (box.parentNode) box.parentNode.removeChild(box);
+    }
+    function close() {
+      if (done) return;
+      done = true;
+      try { sessionStorage.setItem("sjomannen-intro", "sett"); } catch (e) { /* ingen lagring */ }
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", close);
+      box.classList.add("is-closing");
+      box.addEventListener("transitionend", finish, { once: true });
+      setTimeout(finish, 900);           // i tilfelle transitionend ikke kommer
+      try { video.pause(); } catch (e) { /* ignorer */ }
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      else if (e.key === "Tab") { e.preventDefault(); skip.focus(); }   // fokus blir i dialogen
+    }
+
+    if (!video || !video.canPlayType || !video.canPlayType("video/mp4")) { close(); return; }
+    skip.addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("hashchange", close);
+    video.addEventListener("ended", close);
+    video.addEventListener("error", close);
+    var src = $("source", video);
+    if (src) src.addEventListener("error", close);
+    skip.focus({ preventScroll: true });
+
+    var p = video.play();
+    if (p && p.catch) p.catch(close);    // avspilling blokkert: gå rett til forsiden
+    // Treg forbindelse: hvis filmen ikke har startet etter 6 s, gå til forsiden.
+    setTimeout(function () { if (!done && video.currentTime < 0.05) close(); }, 6000);
+  })();
 
   /* Segmented control: én aktiv knapp */
   function segment(root, onPick) {

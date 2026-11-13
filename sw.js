@@ -1,8 +1,8 @@
 /* Sjømannen – service worker for frakoblet bruk.
    Alt appen trenger ligger i én HTML-fil pluss ikoner, så alt lagres ved
    installering. Ny versjon = nytt navn på hurtigbufferen; den gamle slettes. */
-const CACHE = "sjomannen-fe1033f9400f";
-const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png", "./apple-touch-icon.png", "./ms-gann.mp4", "./ms-gann-poster.jpg"];
+const CACHE = "sjomannen-a42e1090d9f3";
+const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./icon-maskable-512.png", "./apple-touch-icon.png", "./ms-gann.mp4", "./ms-gann-poster.jpg", "./sjomannen-intro.mp4", "./sjomannen-intro-poster.jpg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
